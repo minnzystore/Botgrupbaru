@@ -2,36 +2,46 @@ module.exports = {
     name: "join",
     execute: async (sock, from, text, db, safeSend, ctx) => {
 
-        const { sender } = ctx
-        const game = global.tictactoe[from]
+        const { m } = ctx
+        const senderJid = m.key.participant || m.key.remoteJid
+        const senderName = m.pushName || "Player"
 
-        if (!game) {
-            return safeSend(sock, from, { text: "❌ Tidak ada game!" })
+        const room = global.tictactoe[from]
+
+        if (!room) {
+            return safeSend(sock, from, {
+                text: "❌ Belum ada game!"
+            })
         }
 
-        if (game.players.length >= 2) {
-            return safeSend(sock, from, { text: "⚠️ Game sudah penuh!" })
+        if (room.players.length >= 2) {
+            return safeSend(sock, from, {
+                text: "⚠️ Game sudah penuh!"
+            })
         }
 
-        if (game.players.includes(sender)) {
-            return safeSend(sock, from, { text: "⚠️ Kamu sudah join!" })
+        if (room.players.includes(senderJid)) {
+            return safeSend(sock, from, {
+                text: "⚠️ Kamu sudah join!"
+            })
         }
 
-        game.players.push(sender)
+        room.players.push(senderJid)
+        room.names[senderJid] = senderName
 
-        const board = game.board.join(" | ")
+        const [p1, p2] = room.players
 
         await safeSend(sock, from, {
             text: `🎮 *GAME DIMULAI!*
 
-❌ @${game.players[0].split("@")[0]}
-⭕ @${game.players[1].split("@")[0]}
+❌ ${room.names[p1]}
+⭕ ${room.names[p2]}
 
-${board}
+${room.board.join(" | ")}
 
-Giliran: @${game.players[0].split("@")[0]}
-Ketik angka 1-9`,
-            mentions: game.players
+Giliran: ${room.names[p1]}
+Ketik *.move 1-9*`,
+            mentions: [p1, p2]
         })
     }
 }
