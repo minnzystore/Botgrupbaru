@@ -1,3 +1,5 @@
+require("dotenv").config()
+
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -9,7 +11,12 @@ const P = require("pino")
 const qrcode = require("qrcode-terminal")
 const fs = require("fs")
 
-const owner = "6283847956426@s.whatsapp.net"
+// =========================
+// CONFIG
+// =========================
+const OWNER_NUMBER = (process.env.OWNER_NUMBER || "6285798407870")
+    .replace(/[^0-9]/g, "")
+
 const prefix = "."
 
 // =========================
@@ -31,7 +38,37 @@ function saveDB(data) {
 }
 
 // =========================
-// QUEUE
+// HELPER
+// =========================
+function getNumber(jid) {
+    if (!jid) return ""
+    return jid.split("@")[0].split(":")[0]
+}
+
+function toJid(number) {
+    return number + "@s.whatsapp.net"
+}
+
+function isOwnerJid(jid) {
+    return getNumber(jid) === OWNER_NUMBER
+}
+
+// =========================
+// SAFE SEND
+// =========================
+const sleep = (ms) => new Promise(res => setTimeout(res, ms))
+
+async function safeSend(sock, jid, msg) {
+    try {
+        await sock.sendMessage(jid, msg)
+        await sleep(300)
+    } catch (e) {
+        console.log("SEND ERROR:", e)
+    }
+}
+
+// =========================
+// QUEUE SYSTEM
 // =========================
 let queue = []
 let isProcessing = false
@@ -42,54 +79,14 @@ async function runQueue() {
 
     while (queue.length > 0) {
         const job = queue.shift()
-        await job()
+        try {
+            await job()
+        } catch (e) {
+            console.log("QUEUE ERROR:", e)
+        }
     }
 
     isProcessing = false
-}
-
-// =========================
-// GLOBAL
-// =========================
-global.reqCount = {}
-
-const sleep = (ms) => new Promise(res => setTimeout(res, ms))
-
-// =========================
-// ANTI SPAM
-// =========================
-function allowRequest(user) {
-    if (!user) return false
-
-    const now = Date.now()
-
-    if (!global.reqCount[user]) {
-        global.reqCount[user] = { count: 1, time: now }
-        return true
-    }
-
-    const data = global.reqCount[user]
-
-    if (now - data.time > 5000) {
-        global.reqCount[user] = { count: 1, time: now }
-        return true
-    }
-
-    data.count++
-    return data.count <= 5
-}
-
-// =========================
-// SAFE SEND
-// =========================
-async function safeSend(sock, jid, msg) {
-    try {
-        if (!jid) return
-        await sock.sendMessage(jid, msg)
-        await sleep(700)
-    } catch (e) {
-        console.log("SEND ERROR:", e)
-    }
 }
 
 // =========================
@@ -126,8 +123,6 @@ async function startBot() {
 
             if (reason !== DisconnectReason.loggedOut) {
                 setTimeout(startBot, 3000)
-            } else {
-                console.log("⚠️ Scan ulang QR")
             }
         }
     })
@@ -139,22 +134,38 @@ async function startBot() {
         try {
             const { id, participants, action } = data
 
-            for (let user of participants) {
-                const jid = typeof user === "string" ? user : user?.id
+            for (const user of participants) {
+
+                const jid = user?.includes?.("@") ? user : user?.id
                 if (!jid) continue
 
-                const number = jid.split("@")[0]
+                const number = getNumber(jid)
+
+                const time = new Date().toLocaleTimeString("id-ID", {
+                    timeZone: "Asia/Jakarta",
+                    hour: "2-digit",
+                    minute: "2-digit"
+                })
 
                 if (action === "add") {
-                    await safeSend(sock, id, {
-                        text: `👋 Welcome @${number}`,
+                    await sock.sendMessage(id, {
+                        text: `╔═══━━━「 𝐖𝐄𝐋𝐂𝐎𝐌𝐄 」━━━═══╗
+║ 👋 Halo @${number}
+║ 🎉 Selamat datang di grup
+║ 🕒 ${time} WIB
+║ 📌 Jangan lupa baca rules
+╚═══━━━━━━━━━━━━━━━═══╝`,
                         mentions: [jid]
                     })
                 }
 
                 if (action === "remove") {
-                    await safeSend(sock, id, {
-                        text: `👋 Goodbye @${number}`,
+                    await sock.sendMessage(id, {
+                        text: `╔═══━━━「 𝐆𝐎𝐎𝐃𝐁𝐘𝐄 」━━━═══╗
+║ 👋 Bye @${number}
+║ 😢 Semoga ketemu lagi
+║ 🕒 ${time} WIB
+╚═══━━━━━━━━━━━━━━━═══╝`,
                         mentions: [jid]
                     })
                 }
@@ -172,104 +183,111 @@ async function startBot() {
 
     if (fs.existsSync("./commands")) {
         for (const file of fs.readdirSync("./commands")) {
+
+            if (!file.endsWith(".js")) continue
+
             try {
                 const cmd = require(`./commands/${file}`)
+
                 if (cmd?.name && cmd?.execute) {
                     commands.set(cmd.name.toLowerCase(), cmd)
+                    console.log("✅ Loaded:", cmd.name)
+                } else {
+                    console.log("⚠️ Invalid command:", file)
                 }
+
             } catch (e) {
-                console.log("LOAD CMD ERROR:", e)
+                console.log("❌ CMD ERROR:", file, e)
             }
         }
     }
+
+    console.log("📦 Total Commands:", [...commands.keys()])
 
     // =========================
     // MESSAGE HANDLER
     // =========================
     sock.ev.on("messages.upsert", async ({ messages }) => {
         try {
-            const m = messages?.[0]
-            if (!m?.message || !m.key) return
-            if (m.key.fromMe) return
+            for (const m of messages) {
 
-            const from = m.key.remoteJid
-            if (!from || !from.endsWith("@g.us")) return
+                if (!m?.message || m.key.fromMe) continue
 
-            const sender = m.key.participant || m.key.remoteJid
-            if (!sender) return
+                const from = m.key.remoteJid
+                const senderRaw = m.key.participant || m.key.remoteJid
 
-            const text = (
-                m.message?.conversation ||
-                m.message?.extendedTextMessage?.text ||
-                ""
-            ).trim()
+                if (!senderRaw || !senderRaw.includes("@")) continue
 
-            if (!text.startsWith(prefix)) return
+                const sender = getNumber(senderRaw) || senderRaw.split("@")[0]
 
-            if (!allowRequest(sender)) return
+                const text =
+                    m.message?.conversation ||
+                    m.message?.extendedTextMessage?.text ||
+                    m.message?.imageMessage?.caption ||
+                    m.message?.videoMessage?.caption ||
+                    ""
 
-            const command = text.slice(1).split(" ")[0].toLowerCase()
+                if (!text.startsWith(prefix)) continue
 
-            let db = loadDB()
+                const command = text.slice(1).split(" ")[0].toLowerCase()
+                console.log("📩 CMD:", command, "| FROM:", sender)
 
-            // =========================
-            // EXP SYSTEM
-            // =========================
-            if (!db[sender]) {
-                db[sender] = {
-                    exp: 0,
-                    level: 1,
-                    created: Date.now()
+                let db = loadDB()
+
+                if (!db[sender]) db[sender] = { exp: 0, level: 1 }
+
+                db[sender].exp += 10
+
+                while (db[sender].exp >= db[sender].level * 100) {
+                    db[sender].exp -= db[sender].level * 100
+                    db[sender].level++
                 }
-            }
 
-            // tambah exp
-            db[sender].exp += 10
+                saveDB(db)
 
-            // level up
-            const need = db[sender].level * 100
+                let metadata = null
+                let isAdmin = false
 
-            if (db[sender].exp >= need) {
-                db[sender].level++
-                db[sender].exp = 0
+                if (from.endsWith("@g.us")) {
+                    try {
+                        metadata = await sock.groupMetadata(from)
 
-                await safeSend(sock, from, {
-                    text: `🎉 @${sender.split("@")[0]} naik ke level ${db[sender].level}!`,
-                    mentions: [sender]
-                })
-            }
+                        isAdmin = metadata.participants
+                            .filter(p => p.admin)
+                            .some(p => getNumber(p.id) === sender)
 
-            saveDB(db)
+                    } catch (e) {
+                        console.log("GROUP META ERROR:", e)
+                    }
+                }
 
-            const metadata = await sock.groupMetadata(from)
-            const admins = metadata.participants
-                .filter(p => p.admin)
-                .map(p => p.id)
+                const isOwner = isOwnerJid(senderRaw)
 
-            const isAdmin = admins.includes(sender)
-            const isOwner = sender === owner
+                const cmd = commands.get(command)
 
-            const cmd = commands.get(command)
-            if (!cmd) return
+                if (!cmd) {
+                    console.log("❌ CMD NOT FOUND:", command)
+                    continue // 🔥 FIX PENTING
+                }
 
-            queue.push(async () => {
-                try {
+                queue.push(async () => {
                     await cmd.execute(sock, from, text, db, safeSend, {
                         isAdmin,
                         isOwner,
+                        isOwnerJid,
+                        getNumber,
+                        toJid,
                         sender,
                         metadata,
                         m
                     })
-                } catch (e) {
-                    console.log("CMD ERROR:", e)
-                }
-            })
+                })
 
-            runQueue()
+                runQueue()
+            }
 
         } catch (e) {
-            console.log("ERROR:", e)
+            console.log("HANDLER ERROR:", e)
         }
     })
 }
