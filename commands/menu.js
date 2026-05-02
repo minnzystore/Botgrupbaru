@@ -82,7 +82,7 @@ module.exports = {
         const menu = `
 ╭━━━〔 🌸 𝐌𝐈𝐍𝐍𝐙𝐘 𝐁𝐎𝐓 🌸 〕━━━╮
 ┃ 👑 Owner   : ${ownerName}
-┃ 👤 User    : @${sender}
+┃ 👤 User    : ${username}
 ┃ 🎭 Role    : ${role}
 ┃ 🏆 Rank    : ${rank}
 ┃ 📊 Level   : ${level}

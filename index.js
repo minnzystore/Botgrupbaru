@@ -4,7 +4,8 @@ const {
     default: makeWASocket,
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
-    DisconnectReason
+    DisconnectReason,
+    jidDecode
 } = require("@whiskeysockets/baileys")
 
 const P = require("pino")
@@ -12,59 +13,76 @@ const qrcode = require("qrcode-terminal")
 const fs = require("fs")
 
 // =========================
-// CONFIG
+// GLOBAL VARS
 // =========================
-const OWNER_NUMBER = (process.env.OWNER_NUMBER || "6285798407870")
-    .replace(/[^0-9]/g, "")
-
+const commands = new Map()
+const OWNER_NUMBER = (process.env.OWNER_NUMBER || "6285798407870").replace(/[^0-9]/g, "")
 const prefix = "."
+const MAX_QUEUE = 100
 
 // =========================
 // DATABASE
 // =========================
 const DB_FILE = "./database.json"
+let dbLock = false
 
 function loadDB() {
     try {
         if (!fs.existsSync(DB_FILE)) return {}
-        return JSON.parse(fs.readFileSync(DB_FILE))
-    } catch {
+        return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))
+    } catch (e) {
+        console.log("❌ DB LOAD ERROR:", e.message)
         return {}
     }
 }
 
-function saveDB(data) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2))
+async function safeDB(fn) {
+    if (dbLock) return null
+    dbLock = true
+    try {
+        return await fn()
+    } finally {
+        dbLock = false
+    }
 }
 
 // =========================
-// HELPER
+// HELPERS
 // =========================
-function getNumber(jid) {
-    if (!jid) return ""
-    return jid.split("@")[0].split(":")[0]
+function decodeJid(jid) {
+    if (!jid) return null
+    try {
+        if (/:\d+@/gi.test(jid)) {
+            const decode = jidDecode(jid)
+            if (decode?.user && decode?.server) return `${decode.user}@${decode.server}`
+        }
+        return jid
+    } catch {
+        return jid
+    }
+}
+
+function getNumber(jid = "") {
+    return jid?.split("@")[0] || ""
 }
 
 function toJid(number) {
-    return number + "@s.whatsapp.net"
+    return `${number}@s.whatsapp.net`
 }
 
 function isOwnerJid(jid) {
     return getNumber(jid) === OWNER_NUMBER
 }
 
-// =========================
-// SAFE SEND
-// =========================
 const sleep = (ms) => new Promise(res => setTimeout(res, ms))
 
-async function safeSend(sock, jid, msg) {
-    try {
-        await sock.sendMessage(jid, msg)
-        await sleep(300)
-    } catch (e) {
-        console.log("SEND ERROR:", e)
-    }
+// Rate limit
+const userCooldown = new Map()
+function checkCooldown(user, time = 1500) {
+    const now = Date.now()
+    if (userCooldown.has(user) && now - userCooldown.get(user) < time) return false
+    userCooldown.set(user, now)
+    return true
 }
 
 // =========================
@@ -73,223 +91,195 @@ async function safeSend(sock, jid, msg) {
 let queue = []
 let isProcessing = false
 
+async function safeSend(sock, jid, msg) {
+    try {
+        await sock.sendMessage(jid, msg)
+        await sleep(400)
+    } catch (e) {
+        console.log("❌ SEND ERROR:", e.message)
+    }
+}
+
 async function runQueue() {
-    if (isProcessing) return
+    if (isProcessing || queue.length === 0) return
     isProcessing = true
 
     while (queue.length > 0) {
         const job = queue.shift()
         try {
             await job()
+            await sleep(150)
         } catch (e) {
-            console.log("QUEUE ERROR:", e)
+            console.log("❌ QUEUE ERROR:", e.message)
         }
     }
-
     isProcessing = false
 }
 
 // =========================
-// START BOT
+// MAIN BOT
 // =========================
 async function startBot() {
-
+    console.log("🤖 Starting MinnzyBot...")
+    
     const { state, saveCreds } = await useMultiFileAuthState("session")
     const { version } = await fetchLatestBaileysVersion()
 
     const sock = makeWASocket({
         version,
         logger: P({ level: "silent" }),
-        auth: state
+        auth: state,
+        printQRInTerminal: false
     })
 
     sock.ev.on("creds.update", saveCreds)
 
-    // =========================
-    // CONNECTION
-    // =========================
+    // Connection
     sock.ev.on("connection.update", (update) => {
         const { connection, lastDisconnect, qr } = update
 
-        if (qr) qrcode.generate(qr, { small: true })
+        if (qr) {
+            console.log("\n🔗 SCAN QR:")
+            qrcode.generate(qr, { small: true })
+        }
 
         if (connection === "open") {
-            console.log("✅ BOT ONLINE")
+            console.log("\n✅ BOT ONLINE!")
+            console.log(`📱 Owner: ${OWNER_NUMBER}`)
         }
 
         if (connection === "close") {
             const reason = lastDisconnect?.error?.output?.statusCode
-            console.log("❌ DISCONNECT:", reason)
+            console.log("❌ DISCONNECT:", DisconnectReason[reason] || reason)
 
             if (reason !== DisconnectReason.loggedOut) {
+                console.log("🔄 Reconnect 3s...")
                 setTimeout(startBot, 3000)
+            } else {
+                console.log("⚠️ SESSION LOGOUT - Hapus folder 'session'")
             }
         }
     })
 
-    // =========================
-    // WELCOME / GOODBYE
-    // =========================
-    sock.ev.on("group-participants.update", async (data) => {
-        try {
-            const { id, participants, action } = data
-
-            for (const user of participants) {
-
-                const jid = user?.includes?.("@") ? user : user?.id
-                if (!jid) continue
-
-                const number = getNumber(jid)
-
-                const time = new Date().toLocaleTimeString("id-ID", {
-                    timeZone: "Asia/Jakarta",
-                    hour: "2-digit",
-                    minute: "2-digit"
-                })
-
-                if (action === "add") {
-                    await sock.sendMessage(id, {
-                        text: `╔═══━━━「 𝐖𝐄𝐋𝐂𝐎𝐌𝐄 」━━━═══╗
-║ 👋 Halo @${number}
-║ 🎉 Selamat datang di grup
-║ 🕒 ${time} WIB
-║ 📌 Jangan lupa baca rules
-╚═══━━━━━━━━━━━━━━━═══╝`,
-                        mentions: [jid]
-                    })
-                }
-
-                if (action === "remove") {
-                    await sock.sendMessage(id, {
-                        text: `╔═══━━━「 𝐆𝐎𝐎𝐃𝐁𝐘𝐄 」━━━═══╗
-║ 👋 Bye @${number}
-║ 😢 Semoga ketemu lagi
-║ 🕒 ${time} WIB
-╚═══━━━━━━━━━━━━━━━═══╝`,
-                        mentions: [jid]
-                    })
-                }
-            }
-
-        } catch (e) {
-            console.log("WELCOME ERROR:", e)
-        }
-    })
-
-    // =========================
-    // LOAD COMMANDS
-    // =========================
-    const commands = new Map()
-
-    if (fs.existsSync("./commands")) {
-        for (const file of fs.readdirSync("./commands")) {
-
-            if (!file.endsWith(".js")) continue
-
-            try {
-                const cmd = require(`./commands/${file}`)
-
-                if (cmd?.name && cmd?.execute) {
-                    commands.set(cmd.name.toLowerCase(), cmd)
-                    console.log("✅ Loaded:", cmd.name)
-                } else {
-                    console.log("⚠️ Invalid command:", file)
-                }
-
-            } catch (e) {
-                console.log("❌ CMD ERROR:", file, e)
-            }
-        }
-    }
-
-    console.log("📦 Total Commands:", [...commands.keys()])
-
-    // =========================
-    // MESSAGE HANDLER
-    // =========================
+    // Messages
     sock.ev.on("messages.upsert", async ({ messages }) => {
         try {
             for (const m of messages) {
-
-                if (!m?.message || m.key.fromMe) continue
+                if (!m?.message || m.key?.fromMe) continue
 
                 const from = m.key.remoteJid
-                const senderRaw = m.key.participant || m.key.remoteJid
+                if (!from) continue
 
-                if (!senderRaw || !senderRaw.includes("@")) continue
+                const isGroup = from.endsWith("@g.us")
+                m.pushName = m.pushName || "User"
 
-                const sender = getNumber(senderRaw) || senderRaw.split("@")[0]
+                const senderRaw = isGroup ? m.key.participant : from
+                if (!senderRaw) continue
 
-                const text =
-                    m.message?.conversation ||
-                    m.message?.extendedTextMessage?.text ||
-                    m.message?.imageMessage?.caption ||
-                    m.message?.videoMessage?.caption ||
-                    ""
+                const senderJid = decodeJid(senderRaw)
+                if (!senderJid) continue
 
-                if (!text.startsWith(prefix)) continue
+                const sender = getNumber(senderJid)
 
-                const command = text.slice(1).split(" ")[0].toLowerCase()
-                console.log("📩 CMD:", command, "| FROM:", sender)
+                const msg = m.message
+                const text = msg?.conversation || 
+                           msg?.extendedTextMessage?.text || 
+                           msg?.imageMessage?.caption || 
+                           msg?.videoMessage?.caption || ""
 
-                let db = loadDB()
+                // Text check
+                const msgTypes = ['conversation', 'extendedTextMessage']
+                const hasText = msgTypes.some(type => msg?.[type])
+                if (!hasText || !text.startsWith(prefix)) continue
 
-                if (!db[sender]) db[sender] = { exp: 0, level: 1 }
+                // Cooldown
+                if (!checkCooldown(sender)) continue
 
-                db[sender].exp += 10
+                console.log(`📩 ${sender}: ${text.slice(0, 30)}`)
 
-                while (db[sender].exp >= db[sender].level * 100) {
-                    db[sender].exp -= db[sender].level * 100
-                    db[sender].level++
-                }
+                // Level system
+                await safeDB(async () => {
+                    let db = loadDB()
+                    if (!db[sender]) db[sender] = { exp: 0, level: 1 }
 
-                saveDB(db)
+                    db[sender].exp += 10
+                    while (db[sender].exp >= db[sender].level * 100) {
+                        db[sender].exp -= db[sender].level * 100
+                        db[sender].level++
+                    }
+                    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2))
+                })
 
-                let metadata = null
-                let isAdmin = false
-
-                if (from.endsWith("@g.us")) {
+                // Group info
+                let metadata = null, isAdmin = false
+                if (isGroup) {
                     try {
                         metadata = await sock.groupMetadata(from)
-
                         isAdmin = metadata.participants
-                            .filter(p => p.admin)
-                            .some(p => getNumber(p.id) === sender)
-
+                            ?.filter(p => p.admin)
+                            ?.some(p => getNumber(decodeJid(p.id)) === sender) || false
                     } catch (e) {
-                        console.log("GROUP META ERROR:", e)
+                        console.log("⚠️ GROUP ERROR:", e.message)
                     }
                 }
 
-                const isOwner = isOwnerJid(senderRaw)
-
+                // Command
+                const command = text.slice(1).split(" ")[0].toLowerCase()
                 const cmd = commands.get(command)
+                if (!cmd) continue
 
-                if (!cmd) {
-                    console.log("❌ CMD NOT FOUND:", command)
-                    continue // 🔥 FIX PENTING
-                }
-
+                // Queue
+                if (queue.length > MAX_QUEUE) queue.shift()
                 queue.push(async () => {
-                    await cmd.execute(sock, from, text, db, safeSend, {
-                        isAdmin,
-                        isOwner,
-                        isOwnerJid,
-                        getNumber,
-                        toJid,
-                        sender,
-                        metadata,
-                        m
-                    })
+                    try {
+                        await cmd.execute(sock, from, text, loadDB(), safeSend, {
+                            isAdmin,
+                            isOwner: isOwnerJid(senderJid),
+                            isOwnerJid,
+                            getNumber,
+                            toJid,
+                            sender,
+                            senderJid,
+                            metadata,
+                            m,
+                            OWNER_NUMBER,
+                            OWNER_JID: toJid(OWNER_NUMBER)
+                        })
+                    } catch (e) {
+                        console.log(`❌ CMD ${command} ERROR:`, e.message)
+                        await safeSend(sock, from, { 
+                            text: `❌ Error *${command}*\nCoba lagi!` 
+                        })
+                    }
                 })
 
                 runQueue()
             }
-
-        } catch (e) {
-            console.log("HANDLER ERROR:", e)
+        } catch (error) {
+            console.log("🚨 HANDLER ERROR:", error.message)
         }
     })
+
+    // Load Commands
+    if (fs.existsSync("./commands")) {
+        const cmdFiles = fs.readdirSync("./commands").filter(f => f.endsWith('.js'))
+        for (const file of cmdFiles) {
+            try {
+                delete require.cache[require.resolve(`./commands/${file}`)]
+                const cmd = require(`./commands/${file}`)
+                if (cmd?.name && typeof cmd.execute === 'function') {
+                    commands.set(cmd.name.toLowerCase(), cmd)
+                    console.log(`✅ ${cmd.name}`)
+                }
+            } catch (e) {
+                console.log(`❌ CMD ${file}:`, e.message)
+            }
+        }
+    }
+
+    console.log(`\n📦 ${commands.size} Commands`)
+    console.log("🎯 Bot Ready!\n")
 }
 
-startBot()
+// Start
+startBot().catch(console.error)

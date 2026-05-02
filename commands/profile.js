@@ -8,6 +8,7 @@ module.exports = {
         if (!sender || !m) return
 
         const username = m.pushName || "User"
+        const senderJid = typeof toJid === "function" ? toJid(sender) : null
 
         // =========================
         // DB SAFE
@@ -16,8 +17,8 @@ module.exports = {
             db[sender] = { level: 1, exp: 0 }
         }
 
-        let level = db[sender].level
-        let exp = db[sender].exp
+        let level = Number(db[sender].level) || 1
+        let exp = Number(db[sender].exp) || 0
 
         let role = "User"
         let rank = "Bronze 🥉"
@@ -27,6 +28,7 @@ module.exports = {
         // =========================
         if (isOwner) {
             role = "Dewa Pencipta 👑"
+            rank = "Dewa Tertinggi 🌌"
         } else {
             if (isAdmin) role = "Admin 🛡️"
 
@@ -69,7 +71,7 @@ module.exports = {
         // CAPTION
         // =========================
         const caption = `
-╭──〔 🌸 𝐌𝐈𝐍𝐍𝐙𝐘 𝐏𝐑𝐎𝐅𝐈𝐋𝐄 🌸 〕──
+╭──〔 🌸 MINNZY PROFILE 🌸 〕──
 │ 👤 Nama   : ${username}
 │ 🎭 Role   : ${role}
 │ 🏆 Rank   : ${rank}
@@ -84,27 +86,29 @@ module.exports = {
 `
 
         // =========================
-        // AVATAR
+        // AVATAR (LEBIH STABIL)
         // =========================
         const imageUrl = `https://api.dicebear.com/7.x/anime/png?seed=${encodeURIComponent(username)}`
 
         try {
             const res = await axios.get(imageUrl, {
-                responseType: "arraybuffer"
+                responseType: "arraybuffer",
+                timeout: 8000 // 🔥 anti stuck
             })
 
             await sock.sendMessage(from, {
                 image: Buffer.from(res.data),
                 caption,
-                mentions: [toJid(sender)] // 🔥 FIX UTAMA
+                ...(senderJid && { mentions: [senderJid] })
             })
 
         } catch (e) {
-            console.log("IMG ERROR:", e)
+            console.log("IMG ERROR:", e?.message)
 
+            // fallback tanpa gambar
             await safeSend(sock, from, {
                 text: caption,
-                mentions: [toJid(sender)] // 🔥 tetap mention walau gagal gambar
+                ...(senderJid && { mentions: [senderJid] })
             })
         }
     }
